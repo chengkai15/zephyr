@@ -48,6 +48,228 @@ static struct bt_hid_device *hid_get_connection(struct bt_conn *conn)
 	return hid;
 }
 
+static struct net_buf *hid_create_pdu(uint8_t type, uint8_t param)
+{
+	struct net_buf *buf;
+	struct bt_hid_header *hdr;
+
+	buf = bt_l2cap_create_pdu(NULL, sizeof(*hdr));
+	if (!buf) {
+		LOG_ERR("Can't create buf buf for type:%d, param:%d", type, param);
+		return NULL;
+	}
+
+	hdr = net_buf_add(buf, sizeof(*hdr));
+	hdr->type = type;
+	hdr->param = param;
+
+	return buf;
+}
+
+static int hid_send_pdu(struct bt_hid_session *session, struct net_buf *buf)
+{
+	int err;
+
+	err = bt_l2cap_chan_send(&session->br_chan.chan, buf);
+	if (err < 0) {
+		LOG_ERR("L2CAP send fail, err:%d", err);
+		net_buf_unref(buf);
+		return err;
+	}
+
+	return err;
+}
+
+static int hid_send_data(struct bt_hid_session *session, uint8_t type, uint8_t *data, uint16_t len)
+{
+	struct net_buf *buf;
+
+	buf = hid_create_pdu(BT_HID_TYPE_DATA, type);
+	if (!buf) {
+		return -ENOMEM;
+	}
+
+	if (len > 0) {
+		net_buf_add_mem(buf, data, len);
+	}
+
+	return hid_send_pdu(session, buf);
+}
+
+static int hid_send_handshake(struct bt_hid_session *session, uint8_t response)
+{
+	struct net_buf *buf;
+
+	buf = hid_create_pdu(BT_HID_TYPE_HANDSHAKE, response);
+	if (!buf) {
+		return -ENOMEM;
+	}
+
+	return hid_send_pdu(session, buf);
+}
+
+static int hid_control_handle(struct bt_hid_session *session, struct net_buf *buf, uint8_t control)
+{
+	struct bt_hid_device *hid;
+	int err = 0;
+
+	hid = hid_get_connection(session->br_chan.chan.conn);
+	if (!hid) {
+		LOG_ERR("HID not found");
+		return -EIO;
+	}
+
+	switch (control) {
+	case BT_HID_CONTROL_VIRTUAL_CABLE_UNPLUG:
+		bt_hid_device_disconnect(hid);
+		break;
+	case BT_HID_CONTROL_SUSPEND:
+		break;
+	case BT_HID_CONTROL_EXIT_SUSPEND:
+		break;
+	default:
+		LOG_ERR("HID control:%d not handle", control);
+		err = -EINVAL;
+		break;
+	}
+
+	return err;
+}
+
+static int hid_get_report_handle(struct bt_hid_session *session, struct net_buf *buf, uint8_t param)
+{
+	struct bt_hid_device *hid;
+	struct bt_hid_report report = {0};
+
+	hid = hid_get_connection(session->br_chan.chan.conn);
+	if (!hid) {
+		LOG_ERR("HID not found");
+		return -EIO;
+	}
+
+	memcpy(report.data, buf->data, buf->len);
+	report.type = param & HID_PAR_REPORT_TYPE_MASK;
+	report.len = buf->len;
+
+	if (hid_cb == NULL || hid_cb->get_report == NULL) {
+		LOG_ERR("HID get report callback not found");
+		return -ESRCH;
+	}
+
+	hid_cb->get_report(hid, (uint8_t *)&report, sizeof(report));
+	return 0;
+}
+
+static int hid_set_report_handle(struct bt_hid_session *session, struct net_buf *buf, uint8_t param)
+{
+	struct bt_hid_device *hid;
+	struct bt_hid_report report = {0};
+
+	hid = hid_get_connection(session->br_chan.chan.conn);
+	if (!hid) {
+		LOG_ERR("HID not found");
+		return -EIO;
+	}
+
+	memcpy(report.data, buf->data, buf->len);
+	report.type = param & HID_PAR_REPORT_TYPE_MASK;
+	report.len = buf->len;
+
+	if (hid_cb == NULL || hid_cb->set_report == NULL) {
+		LOG_ERR("HID set report callback not found");
+		return -ESRCH;
+	}
+
+	hid_cb->set_report(hid, (uint8_t *)&report, sizeof(report));
+	return 0;
+}
+
+static int hid_get_protocol_handle(struct bt_hid_session *session, struct net_buf *buf,
+				   uint8_t param)
+{
+	struct bt_hid_device *hid;
+
+	hid = hid_get_connection(session->br_chan.chan.conn);
+	if (!hid) {
+		LOG_ERR("HID not found");
+		return -EIO;
+	}
+
+	if (hid_cb == NULL || hid_cb->get_protocol == NULL) {
+		LOG_ERR("HID get protocol callback not found");
+		return -ESRCH;
+	}
+
+	hid_cb->get_protocol(hid);
+	return 0;
+}
+
+static int hid_set_protocol_handle(struct bt_hid_session *session, struct net_buf *buf,
+				   uint8_t param)
+{
+	struct bt_hid_device *hid;
+	uint8_t protocol;
+
+	hid = hid_get_connection(session->br_chan.chan.conn);
+	if (!hid) {
+		LOG_ERR("HID not found");
+		return -EIO;
+	}
+
+	protocol = param & BT_HID_PROTOCOL_MASK;
+
+	if (hid_cb == NULL || hid_cb->set_protocol == NULL) {
+		LOG_ERR("HID set protocol callback not found");
+		return -ESRCH;
+	}
+
+	hid_cb->set_protocol(hid, protocol);
+	return hid_send_handshake(session, BT_HID_HANDSHAKE_RSP_SUCCESS);
+}
+
+static int hid_intr_handle(struct bt_hid_session *session, struct net_buf *buf, uint8_t param)
+{
+	struct bt_hid_device *hid;
+	struct bt_hid_report report = {0};
+
+	hid = hid_get_connection(session->br_chan.chan.conn);
+	if (!hid) {
+		LOG_ERR("HID not found");
+		return -EIO;
+	}
+
+	report.type = param & HID_PAR_REPORT_TYPE_MASK;
+	report.len = buf->len;
+	memcpy(report.data, buf->data, buf->len);
+
+	if (session->role != BT_HID_SESSION_ROLE_INTR) {
+		LOG_ERR("HID invalid role");
+		return -EIO;
+	}
+
+	if (hid_cb == NULL || hid_cb->intr_data == NULL) {
+		LOG_ERR("HID intr data callback not found");
+		return -ESRCH;
+	}
+
+	hid_cb->intr_data(hid, (uint8_t *)&report, sizeof(report));
+	return 0;
+}
+
+struct hid_msg_handler {
+	uint8_t type;
+	int (*func)(struct bt_hid_session *session, struct net_buf *buf, uint8_t param);
+};
+
+static const struct hid_msg_handler handler[] = {
+	{BT_HID_TYPE_CONTROL, hid_control_handle},
+	{BT_HID_TYPE_GET_REPORT, hid_get_report_handle},
+	{BT_HID_TYPE_SET_REPORT, hid_set_report_handle},
+	{BT_HID_TYPE_GET_PROTOCOL, hid_get_protocol_handle},
+	{BT_HID_TYPE_SET_PROTOCOL, hid_set_protocol_handle},
+	{BT_HID_TYPE_DATA, hid_intr_handle},
+};
+
 static void bt_hid_l2cap_connected(struct bt_l2cap_chan *chan)
 {
 	struct bt_hid_device *hid;
@@ -93,7 +315,7 @@ static void bt_hid_l2cap_disconnected(struct bt_l2cap_chan *chan)
 	}
 
 	session = HID_SESSION_BY_CHAN(chan);
-	LOG_ERR("HID disconnected:%d state %d", session->role, hid->state);
+	LOG_DBG("HID disconnected:%d state %d", session->role, hid->state);
 
 	session->br_chan.chan.conn = NULL;
 
@@ -107,7 +329,55 @@ static void bt_hid_l2cap_disconnected(struct bt_l2cap_chan *chan)
 	}
 
 	hid->conn = NULL;
+	hid->plugged = 0;
 	hid->state = BT_HID_STATE_DISTCONNECTED;
+}
+
+static int bt_hid_l2cap_recv(struct bt_l2cap_chan *chan, struct net_buf *buf)
+{
+	struct bt_hid_header *hdr;
+	struct bt_hid_session *session;
+	int i;
+	int err = -ESRCH;
+	int response;
+
+	if (!chan) {
+		LOG_ERR("Invalid hid chan");
+		return -EIO;
+	}
+
+	hdr = (struct bt_hid_header *)buf->data;
+	net_buf_pull(buf, sizeof(*hdr));
+	session = HID_SESSION_BY_CHAN(chan);
+
+	LOG_DBG("HID recv type[0x%x] param[0x%x]", hdr->type, hdr->param);
+
+	for (i = 0; i < ARRAY_SIZE(handler); i++) {
+		if (hdr->type == handler[i].type) {
+			err = handler[i].func(session, buf, hdr->param);
+			break;
+		}
+	}
+
+	if (err == 0) {
+		return err;
+	}
+
+	switch (err) {
+	case -EINVAL:
+		response = BT_HID_HANDSHAKE_RSP_ERR_INVALID_PARAM;
+		break;
+	case -ESRCH:
+		response = BT_HID_HANDSHAKE_RSP_ERR_UNSUPPORTED_REQ;
+		break;
+	default:
+		response = BT_HID_HANDSHAKE_RSP_ERR_UNKNOWN;
+		break;
+	}
+
+	LOG_ERR("HID handle err %d", err);
+
+	return hid_send_handshake(session, response);
 }
 
 static void bt_hid_init(struct bt_hid_device *hid, struct bt_conn *conn, enum bt_hid_role role)
@@ -115,7 +385,7 @@ static void bt_hid_init(struct bt_hid_device *hid, struct bt_conn *conn, enum bt
 	static const struct bt_l2cap_chan_ops ops = {
 		.connected = bt_hid_l2cap_connected,
 		.disconnected = bt_hid_l2cap_disconnected,
-		.recv = NULL,
+		.recv = bt_hid_l2cap_recv,
 	};
 
 	LOG_ERR("HID conn %p initialized", hid);
