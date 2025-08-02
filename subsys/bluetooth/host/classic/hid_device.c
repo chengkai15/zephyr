@@ -477,18 +477,24 @@ static int hid_l2cap_intr_accept(struct bt_conn *conn, struct bt_l2cap_server *s
 int bt_hid_device_send_ctrl_data(struct bt_hid_device *hid, uint8_t type, uint8_t *data,
 				 uint16_t len)
 {
-	return -ENOTSUP;
+	__ASSERT_NO_MSG(hid);
+
+	return hid_send_data(&hid->ctrl_session, type, data, len);
 }
 
 int bt_hid_device_send_intr_data(struct bt_hid_device *hid, uint8_t type, uint8_t *data,
 				 uint16_t len)
 {
-	return -ENOTSUP;
+	__ASSERT_NO_MSG(hid);
+
+	return hid_send_data(&hid->intr_session, type, data, len);
 }
 
 int bt_hid_device_report_error(struct bt_hid_device *hid, uint8_t error)
 {
-	return -ENOTSUP;
+	__ASSERT_NO_MSG(hid);
+
+	return hid_send_handshake(&hid->ctrl_session, error);
 }
 
 struct bt_hid_device *bt_hid_device_connect(struct bt_conn *conn)
